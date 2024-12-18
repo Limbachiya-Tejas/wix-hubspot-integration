@@ -1,0 +1,168 @@
+const SPREADSHEET_URL = '// Replace with your actual Google Sheet URL'; 
+const HUBSPOT_API_TOKEN = '// Replace with your HubSpot Personal Access Token'; 
+const HUBSPOT_CONTACT_API_URL = 'https://api.hubapi.com/contacts/v1/contact';
+const HUBSPOT_CONTACT_SEARCH_URL = 'https://api.hubapi.com/contacts/v1/contact/email/'; // Search by email endpoint
+const HUBSPOT_DEAL_API_URL = 'https://api.hubapi.com/deals/v1/deal/';
+
+// Function to process new row data and send it to HubSpot
+function checkNewRowAndSendToHubSpot() {
+  try {
+    // Open the spreadsheet by its URL
+    const spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+    const sheet = spreadsheet.getSheets()[0]; // Access the first sheet
+    const lastRow = sheet.getLastRow();
+    const lastColumn = sheet.getLastColumn();
+
+    // Check if there is a new row and fetch its data
+    if (lastRow > 1) { // Assuming Row 1 is the header
+      const newRowData = sheet.getRange(lastRow, 1, 1, lastColumn).getValues()[0];
+
+      // Prepare the data to send to HubSpot Contacts
+      const contactData = {
+        properties: [
+          { property: 'firstname', value: newRowData[0] }, // First Name (Column A)
+          { property: 'lastname', value: newRowData[1] },  // Last Name (Column B)
+          { property: 'email', value: newRowData[2] },     // Email (Column C)
+          { property: 'phone', value: newRowData[3] },     // Phone (Column D)
+          { property: 'hs_country_region_code', value: newRowData[4] },    // Country (Column F)
+        ]
+      };
+
+      const projectType = newRowData[5]; 
+      // Get the deal description (Message from the spreadsheet)
+      const dealDescription = newRowData[6]; // Assuming "deal description" is in the same column as the message
+
+      // Check if the contact already exists in HubSpot
+      checkAndCreateOrUpdateContact(contactData, dealDescription, projectType);
+    }
+  } catch (error) {
+    Logger.log('Error processing new row: ' + error.message);
+  }
+}
+
+// Function to check if a contact exists and create/update it
+function checkAndCreateOrUpdateContact(contactData, dealDescription, projectType) {
+  const email = contactData.properties.find(prop => prop.property === 'email').value;
+  const searchContactUrl = `${HUBSPOT_CONTACT_SEARCH_URL}${email}/profile`;
+
+  const options = {
+    method: 'get',
+    headers: {
+      Authorization: `Bearer ${HUBSPOT_API_TOKEN}`,
+    },
+    muteHttpExceptions: true // To handle cases where the contact doesn't exist
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(searchContactUrl, options);
+    const responseCode = response.getResponseCode();
+
+    if (responseCode === 200) {
+      // Contact exists, retrieve the vid
+      const contactResponse = JSON.parse(response.getContentText());
+      const contactVid = contactResponse.vid;
+
+      Logger.log('Contact exists. Vid: ' + contactVid);
+
+      // Create a new deal for the existing contact
+      const firstName = contactData.properties.find(prop => prop.property === 'firstname').value;
+      const lastName = contactData.properties.find(prop => prop.property === 'lastname').value;
+      const dealName = `wix - ${firstName} ${lastName}`; // Example deal name format
+
+      createDealInHubSpot(contactVid, dealName, dealDescription, projectType);
+    } else if (responseCode === 404) {
+      // Contact does not exist, create a new contact
+      Logger.log('Contact not found. Creating a new contact.');
+
+      createNewContactInHubSpot(contactData, dealDescription, projectType);
+    } else {
+      Logger.log('Error checking contact: ' + response.getContentText());
+    }
+  } catch (error) {
+    Logger.log('Error checking or creating contact: ' + error.message);
+  }
+}
+
+// Function to create a new contact in HubSpot
+function createNewContactInHubSpot(contactData, dealDescription, projectType) {
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      Authorization: `Bearer ${HUBSPOT_API_TOKEN}`,
+    },
+    payload: JSON.stringify(contactData),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(HUBSPOT_CONTACT_API_URL, options);
+    const responseCode = response.getResponseCode();
+    const responseBody = JSON.parse(response.getContentText());
+
+    if (responseCode === 200 || responseCode === 201) {
+      Logger.log('Contact successfully created.');
+
+      // Extract the new contact's vid
+      const contactVid = responseBody.vid;
+
+      // Create a new deal for the new contact
+      const firstName = contactData.properties.find(prop => prop.property === 'firstname').value;
+      const lastName = contactData.properties.find(prop => prop.property === 'lastname').value;
+      const dealName = `wix - ${firstName} ${lastName}`; // Example deal name format
+
+      createDealInHubSpot(contactVid, dealName, dealDescription, projectType);
+    } else {
+      Logger.log('Error creating contact: ' + JSON.stringify(responseBody));
+    }
+  } catch (error) {
+    Logger.log('Error creating contact: ' + error.message);
+  }
+}
+
+// Function to create a deal in HubSpot and associate it with a contact
+function createDealInHubSpot(contactVid, dealName, dealDescription, projectType) {
+  const dealData = {
+    properties: [
+      { name: 'dealname', value: dealName }, // Deal Name
+      { name: 'pipeline', value: 'default' }, // Default Pipeline
+      { name: 'dealstage', value: 'appointmentscheduled' }, // Initial deal stage
+      { name: 'deal_source', value: 'wix' }, // Initial deal source value
+      { name: 'description', value: dealDescription }, // Pass the deal description (message) here
+      { name: 'project_type', value: projectType } // Pass the project type here
+    ],
+    associations: {
+      associatedVids: [contactVid] // Associate the deal with the contact ID
+    }
+  };
+
+  const dealOptions = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      Authorization: `Bearer ${HUBSPOT_API_TOKEN}`, // Use Bearer Token for HubSpot API
+    },
+    payload: JSON.stringify(dealData),
+    muteHttpExceptions: true // To allow us to examine full error responses
+  };
+
+  const dealUrl = HUBSPOT_DEAL_API_URL;
+
+  try {
+    // Send the HTTP request to create a deal
+    const dealResponse = UrlFetchApp.fetch(dealUrl, dealOptions);
+    const dealResponseCode = dealResponse.getResponseCode();
+    const dealResponseBody = dealResponse.getContentText();
+
+    Logger.log('Deal Response Code: ' + dealResponseCode);
+    Logger.log('Deal Response Body: ' + dealResponseBody);
+
+    if (dealResponseCode === 200 || dealResponseCode === 201) {
+      Logger.log('Deal successfully created.');
+    } else {
+      Logger.log('Error creating deal in HubSpot: ' + dealResponseBody);
+    }
+  } catch (error) {
+    Logger.log('Error sending data to HubSpot Deals: ' + error.message);
+  }
+}
